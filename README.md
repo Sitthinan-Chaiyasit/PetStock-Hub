@@ -100,11 +100,17 @@ docker run --rm -p 8000:8000 -e SECRET_KEY="replace-with-a-long-random-value" -v
 
 ## Deploy ด้วย Vercel + PostgreSQL
 
-สำหรับ Vercel ให้ใช้ PostgreSQL แทน SQLite เพราะ Vercel Function ไม่มีพื้นที่เก็บฐานข้อมูลแบบไฟล์ถาวร โปรเจกต์เตรียม [vercel.json](vercel.json), [api/index.py](api/index.py) และ [schema_postgres.sql](schema_postgres.sql) ไว้แล้ว
+สำหรับ Vercel ให้ใช้ PostgreSQL แทน SQLite โปรเจกต์ใช้ `app.py` เป็น entrypoint โดยตรง พร้อม [vercel.json](vercel.json) และ [schema_postgres.sql](schema_postgres.sql)
 
 1. ใน Vercel Marketplace ติดตั้ง PostgreSQL provider เช่น Neon หรือ Supabase แล้วเชื่อมกับ project
 2. ตั้ง Environment Variables ใน Vercel: `DATABASE_URL` (connection string ของ provider), `SECRET_KEY` (ค่าสุ่มยาว), และ `REQUIRE_SECRET_KEY=1`
 3. Import GitHub repository นี้ใน Vercel แล้วกด Deploy — ไม่ต้องใช้ Dockerfile หรือ Render config
 4. การ deploy ครั้งแรกจะสร้างตารางและข้อมูลตัวอย่างใน PostgreSQL โดยอัตโนมัติ; เปลี่ยนรหัสผ่าน `admin123` ทันทีหลังเข้าใช้
 
-Vercel จะส่งทุก URL ไปยัง Flask Function เดียวผ่าน rewrite และใช้ `DATABASE_URL` ในการเชื่อมต่อ PostgreSQL. อย่าตั้ง `PETSTOCK_DB` บน Vercel เพราะใช้เฉพาะโหมด SQLite/Docker เท่านั้น
+Vercel ใช้ Flask `app` จาก `app.py` โดยตรงและใช้ `DATABASE_URL` (หรือ `POSTGRES_URL`) เพื่อเชื่อม PostgreSQL. อย่าตั้ง `PETSTOCK_DB` บน Vercel เพราะใช้เฉพาะโหมด SQLite/Docker
+
+### แก้ sqlite3.OperationalError: unable to open database file
+
+หมายถึง deployment ไม่ได้เลือก PostgreSQL ให้เชื่อม Neon กับโปรเจกต์ แล้วตั้ง `DATABASE_URL` ใน Settings → Environment Variables เป็น connection string ที่ขึ้นต้น `postgresql://` หรือ `postgres://` (ใช้ pooled connection พร้อม SSL ตามค่าจาก Neon) เลือก environment ให้ตรงกับ deployment เช่น Preview หรือ Production แล้ว redeploy ใหม่ ค่าที่ตั้งใหม่ไม่เปลี่ยน deployment เก่าที่เปิดอยู่ อย่าส่ง connection string หรือรหัสผ่านลงใน chat หรือ Git
+
+การเริ่มระบบใช้ transaction และ PostgreSQL advisory lock เพื่อประสานหลาย Function และไม่เพิ่มข้อมูลตัวอย่างซ้ำเมื่อเริ่มใหม่ ชุดทดสอบ `.github/workflows/tests.yml` ตรวจทั้ง SQLite และ PostgreSQL บนฐานข้อมูลทดสอบแยก ในเครื่องที่ไม่ตั้ง `TEST_POSTGRES_URL` กรณี PostgreSQL จะถูก skip ไม่ถือว่าทดสอบผ่าน

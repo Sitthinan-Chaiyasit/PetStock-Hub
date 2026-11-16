@@ -22,7 +22,7 @@ except ImportError:  # Local SQLite-only development remains possible.
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 DEFAULT_SECRET_KEY = "change-this-before-production"
-DATABASE_URL = os.environ.get("DATABASE_URL", "")
+DATABASE_URL = (os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL") or "").strip()
 USING_POSTGRES = DATABASE_URL.startswith(("postgres://", "postgresql://"))
 DB_PATH = os.environ.get("PETSTOCK_DB", os.path.join(BASE_DIR, "petstock.db"))
 
@@ -44,7 +44,9 @@ class PostgresConnection:
     def execute(self, query, params=()):
         if query.strip().upper() == "BEGIN IMMEDIATE": query = "BEGIN"
         return self.raw.execute(self.sql(query), params)
-    def executemany(self, query, params): return self.raw.cursor().executemany(self.sql(query), params)
+    def executemany(self, query, params):
+        with self.raw.cursor() as cursor:
+            cursor.executemany(self.sql(query), params)
     def executescript(self, script):
         for statement in script.split(";"):
             if statement.strip(): self.execute(statement)
@@ -55,7 +57,7 @@ class PostgresConnection:
 def open_connection():
     if USING_POSTGRES:
         if psycopg is None: raise RuntimeError("PostgreSQL requires psycopg; install requirements.txt")
-        return PostgresConnection(psycopg.connect(DATABASE_URL, autocommit=True, row_factory=dict_row))
+        return PostgresConnection(psycopg.connect(DATABASE_URL, autocommit=True, row_factory=dict_row, connect_timeout=10))
     conn = sqlite3.connect(app.config["DATABASE"], isolation_level=None)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
@@ -169,7 +171,7 @@ def dashboard():
     transferring = row("SELECT COALESCE(SUM(quantity),0) n FROM stock_batches WHERE state='in_transfer'")["n"]
     low = rows("""SELECT p.name, p.sku, l.name location, COALESCE(SUM(b.quantity),0) qty, p.reorder_point
                   FROM products p CROSS JOIN locations l LEFT JOIN stock_batches b ON b.product_id=p.id AND b.location_id=l.id AND b.state='available'
-                  GROUP BY p.id,l.id HAVING qty <= p.reorder_point ORDER BY qty LIMIT 8""")
+                  GROUP BY p.id,l.id HAVING COALESCE(SUM(b.quantity),0) <= p.reorder_point ORDER BY qty LIMIT 8""")
     expiring = rows("""SELECT p.name,b.lot_no,b.expires_on,b.quantity,l.name location FROM stock_batches b
                       JOIN products p ON p.id=b.product_id JOIN locations l ON l.id=b.location_id
                       WHERE b.state='available' AND b.expires_on IS NOT NULL AND b.expires_on >= ? AND b.expires_on <= ? ORDER BY b.expires_on LIMIT 8""", (today(), (date.today() + timedelta(days=60)).isoformat()))
@@ -191,7 +193,7 @@ def products():
         return redirect(url_for("products"))
     q=request.args.get("q", "")
     products=rows("""SELECT p.*,c.name category, COALESCE(SUM(b.quantity),0) total FROM products p JOIN categories c ON c.id=p.category_id
-                   LEFT JOIN stock_batches b ON b.product_id=p.id AND b.state='available' WHERE p.name LIKE ? OR p.sku LIKE ? OR COALESCE(p.barcode,'') LIKE ? GROUP BY p.id ORDER BY p.name""", (f"%{q}%",)*3)
+                   LEFT JOIN stock_batches b ON b.product_id=p.id AND b.state='available' WHERE p.name LIKE ? OR p.sku LIKE ? OR COALESCE(p.barcode,'') LIKE ? GROUP BY p.id,c.name ORDER BY p.name""", (f"%{q}%",)*3)
     return render_template("products.html", user=user, products=products, categories=rows("SELECT * FROM categories"), q=q)
 
 @app.route("/stock")
@@ -408,25 +410,44 @@ def reports():
 @login_required
 def stock_csv():
     out=io.StringIO(); writer=csv.writer(out); writer.writerow(["SKU","สินค้า","สถานที่","ล็อต","หมดอายุ","สถานะ","จำนวน","หน่วย"])
-    for b in rows("SELECT p.sku,p.name,l.name,b.lot_no,b.expires_on,b.state,b.quantity,p.unit FROM stock_batches b JOIN products p ON p.id=b.product_id JOIN locations l ON l.id=b.location_id ORDER BY p.name"):
-        writer.writerow(list(b))
+    fields = ('sku', 'product_name', 'location_name', 'lot_no', 'expires_on', 'state', 'quantity', 'unit')
+    for b in rows("SELECT p.sku,p.name product_name,l.name location_name,b.lot_no,b.expires_on,b.state,b.quantity,p.unit FROM stock_batches b JOIN products p ON p.id=b.product_id JOIN locations l ON l.id=b.location_id ORDER BY p.name"):
+        writer.writerow([b[key] for key in fields])
     return Response("\ufeff"+out.getvalue(), mimetype="text/csv", headers={"Content-Disposition":"attachment; filename=petstock-stock.csv"})
 
 def init_database():
     global _database_initialized
-    if os.environ.get("REQUIRE_SECRET_KEY") == "1" and app.config["SECRET_KEY"] == DEFAULT_SECRET_KEY:
+    if (os.environ.get("REQUIRE_SECRET_KEY") == "1" or os.environ.get("VERCEL")) and (not app.config["SECRET_KEY"] or app.config["SECRET_KEY"] == DEFAULT_SECRET_KEY):
         raise RuntimeError("SECRET_KEY must be set before production startup")
+    if os.environ.get("VERCEL") and not USING_POSTGRES:
+        raise RuntimeError("Vercel requires a PostgreSQL DATABASE_URL in this deployment environment")
     if not USING_POSTGRES:
         database_dir = os.path.dirname(os.path.abspath(app.config["DATABASE"]))
         os.makedirs(database_dir, exist_ok=True)
-    first = USING_POSTGRES or not os.path.exists(app.config["DATABASE"])
     conn=open_connection()
-    if not USING_POSTGRES: conn.execute("PRAGMA journal_mode=WAL")
+    try:
+        if not USING_POSTGRES: conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("BEGIN" if USING_POSTGRES else "BEGIN IMMEDIATE")
+        if USING_POSTGRES:
+            # Transaction-scoped lock also coordinates separate Vercel instances.
+            conn.execute("SELECT pg_advisory_xact_lock(73910482)")
+        _initialize_schema_and_seed(conn)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    _database_initialized = True
+
+def _initialize_schema_and_seed(conn):
     schema_name = "schema_postgres.sql" if USING_POSTGRES else "schema.sql"
     with open(os.path.join(BASE_DIR, schema_name), encoding="utf-8") as schema_file:
-        conn.executescript(schema_file.read())
-    if first or not conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]:
-        conn.executescript("""
+        # sqlite3.executescript implicitly commits; execute separately to keep startup atomic.
+        for statement in schema_file.read().split(';'):
+            if statement.strip(): conn.execute(statement)
+    if not conn.execute("SELECT COUNT(*) AS total FROM users").fetchone()["total"]:
+        seed_sql="""
         INSERT INTO locations(id,code,name,kind) VALUES(1,'WH','คลังกลาง','warehouse'),(2,'BKK01','สาขาสยาม','branch'),(3,'BKK02','สาขาลาดพร้าว','branch'),(4,'BKK03','สาขาบางนา','branch');
         INSERT INTO categories(id,name) VALUES(1,'อาหารสุนัข'),(2,'อาหารแมว'),(3,'อาหารเสริมสัตว์'),(4,'อุปกรณ์สัตว์เลี้ยง');
         INSERT INTO products(id,sku,barcode,name,category_id,brand,pack_size,unit,cost,price,reorder_point,is_lot_tracked) VALUES
@@ -434,7 +455,16 @@ def init_database():
         INSERT INTO stock_batches(product_id,location_id,quantity,lot_no,expires_on,state) VALUES
         (1,1,100,'DOG2409A','2027-03-31','available'),(2,1,35,'DOG2410B','2027-06-30','available'),(3,1,60,'CAT2408A','2027-01-15','available'),(4,1,25,'OMG2407A','2027-02-28','available'),(5,1,40,NULL,NULL,'available'),
         (1,2,5,'DOG2408S','2027-01-31','available'),(3,2,8,'CAT2407S','2026-12-20','available'),(5,2,15,NULL,NULL,'available'),(2,3,4,'DOG2409L','2027-03-31','available'),(4,4,3,'OMG2407B','2027-02-28','available');
-        """)
+        """
+        for statement in seed_sql.split(';'):
+            if not statement.strip(): continue
+            if 'INSERT INTO stock_batches' in statement:
+                # Preserve stock left behind by an older, partially completed startup.
+                if conn.execute('SELECT COUNT(*) AS total FROM stock_batches').fetchone()['total']:
+                    continue
+                conn.execute(statement)
+            else:
+                conn.execute(statement + ' ON CONFLICT DO NOTHING')
         conn.executemany("INSERT INTO users(id,username,password,display_name,role,location_id) VALUES(?,?,?,?,?,?)", [
             (1, "admin", generate_password_hash("admin123"), "ผู้ดูแลคลัง", "admin", 1),
             (2, "siam", generate_password_hash("branch123"), "พนักงานสาขาสยาม", "branch", 2),
@@ -448,10 +478,8 @@ def init_database():
     # It upgrades only an exact known plain-text demo password; user-changed passwords remain untouched.
     for username, legacy_password in (("admin", "admin123"), ("siam", "branch123"), ("ladprao", "branch123"), ("bangna", "branch123")):
         record = conn.execute("SELECT password FROM users WHERE username=?", (username,)).fetchone()
-        if record and record[0] == legacy_password:
+        if record and record["password"] == legacy_password:
             conn.execute("UPDATE users SET password=? WHERE username=?", (generate_password_hash(legacy_password), username))
-    conn.commit();conn.close()
-    _database_initialized = True
 
 @app.before_request
 def initialize_database_for_serverless():

@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import app as petstock
 
@@ -36,7 +37,7 @@ class InventoryWorkflowTests(unittest.TestCase):
 
     def stock_total(self, state, location):
         with petstock.app.app_context():
-            return petstock.db().execute("SELECT COALESCE(SUM(quantity),0) FROM stock_batches WHERE product_id=1 AND state=? AND location_id=?", (state, location)).fetchone()[0]
+            return petstock.db().execute("SELECT COALESCE(SUM(quantity),0) AS total FROM stock_batches WHERE product_id=1 AND state=? AND location_id=?", (state, location)).fetchone()['total']
 
     def test_approve_then_receive_is_idempotent(self):
         request_id = self.create_request(20)
@@ -83,6 +84,56 @@ class InventoryWorkflowTests(unittest.TestCase):
         response = self.client.get("/healthz")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["status"], "ok")
+
+    def test_vercel_missing_postgres_never_opens_sqlite(self):
+        with patch.dict(os.environ, {'VERCEL': '1'}), patch.object(petstock, 'USING_POSTGRES', False):
+            with patch.object(petstock, 'open_connection') as connect:
+                with self.assertRaisesRegex(RuntimeError, 'PostgreSQL DATABASE_URL'):
+                    petstock.init_database()
+                connect.assert_not_called()
+
+    def test_startup_accepts_dictionary_rows(self):
+        original_connect = petstock.open_connection
+
+        def connect():
+            conn = original_connect()
+            if not petstock.USING_POSTGRES:
+                conn.row_factory = lambda cursor, values: dict(zip(
+                    [column[0] for column in cursor.description], values))
+            return conn
+
+        with patch.object(petstock, 'open_connection', connect):
+            petstock.init_database()
+            petstock.init_database()
+        self.assertEqual(self.stock_total('available', 1), 100)
+
+    def test_restart_preserves_stock_and_passwords(self):
+        with petstock.app.app_context():
+            conn = petstock.db()
+            conn.execute("UPDATE stock_batches SET quantity=73 WHERE product_id=1 AND location_id=1")
+            password = conn.execute("SELECT password FROM users WHERE id=1").fetchone()['password']
+        petstock.init_database()
+        petstock.init_database()
+        self.assertEqual(self.stock_total('available', 1), 73)
+        with petstock.app.app_context():
+            self.assertEqual(petstock.row('SELECT COUNT(*) AS n FROM users')['n'], 4)
+            self.assertEqual(petstock.row('SELECT password FROM users WHERE id=1')['password'], password)
+
+    def test_pages_and_csv_after_login(self):
+        self.login('admin', 'admin123')
+        for path in ('/', '/products', '/stock', '/stock?view=lots', '/requisitions', '/receipts', '/admin', '/reports'):
+            with self.subTest(path=path):
+                self.assertEqual(self.client.get(path).status_code, 200)
+        export = self.client.get('/reports/stock.csv').get_data(as_text=True)
+        self.assertIn('DOG-AD-1KG', export)
+
+    def test_partial_old_startup_preserves_existing_stock(self):
+        with petstock.app.app_context():
+            petstock.db().execute('DELETE FROM users')
+            petstock.db().execute('UPDATE stock_batches SET quantity=73 WHERE product_id=1 AND location_id=1')
+        petstock.init_database()
+        self.assertEqual(self.stock_total('available', 1), 73)
+        self.assertEqual(self.login('admin', 'admin123').status_code, 302)
 
 
 if __name__ == "__main__":
