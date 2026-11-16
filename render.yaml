@@ -1,0 +1,19 @@
+services:
+  - type: web
+    runtime: docker
+    name: petstock-hub
+    healthCheckPath: /healthz
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: PETSTOCK_DB
+        value: /data/petstock.db
+      - key: REQUIRE_SECRET_KEY
+        value: "1"
+      # SQLite has a single writer. Do not increase this without moving to PostgreSQL.
+      - key: GUNICORN_WORKERS
+        value: "1"
+    disk:
+      name: petstock-data
+      mountPath: /data
+      sizeGB: 1

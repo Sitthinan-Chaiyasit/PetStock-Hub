@@ -1,0 +1,48 @@
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY, username TEXT UNIQUE NOT NULL, password TEXT NOT NULL,
+  display_name TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('admin','branch')),
+  location_id INTEGER
+);
+CREATE TABLE IF NOT EXISTS locations (
+  id INTEGER PRIMARY KEY, code TEXT UNIQUE NOT NULL, name TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN ('warehouse','branch'))
+);
+CREATE TABLE IF NOT EXISTS categories (
+  id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL
+);
+CREATE TABLE IF NOT EXISTS products (
+  id INTEGER PRIMARY KEY, sku TEXT UNIQUE NOT NULL, barcode TEXT UNIQUE,
+  name TEXT NOT NULL, category_id INTEGER NOT NULL REFERENCES categories(id),
+  brand TEXT, pack_size TEXT, unit TEXT NOT NULL, cost REAL NOT NULL,
+  price REAL NOT NULL, reorder_point INTEGER NOT NULL DEFAULT 0, is_lot_tracked INTEGER NOT NULL DEFAULT 1,
+  image_url TEXT
+);
+CREATE TABLE IF NOT EXISTS stock_batches (
+  id INTEGER PRIMARY KEY, product_id INTEGER NOT NULL REFERENCES products(id),
+  location_id INTEGER NOT NULL REFERENCES locations(id), quantity INTEGER NOT NULL CHECK(quantity >= 0),
+  lot_no TEXT, expires_on TEXT, state TEXT NOT NULL DEFAULT 'available' CHECK(state IN ('available','in_transfer')),
+  requisition_id INTEGER, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS requisitions (
+  id INTEGER PRIMARY KEY, document_no TEXT UNIQUE NOT NULL, branch_id INTEGER NOT NULL REFERENCES locations(id),
+  requester_id INTEGER NOT NULL REFERENCES users(id), status TEXT NOT NULL DEFAULT 'draft'
+    CHECK(status IN ('draft','pending','approved','received','rejected','cancelled')),
+  note TEXT, rejection_reason TEXT, approved_by INTEGER REFERENCES users(id),
+  approved_at TEXT, received_by INTEGER REFERENCES users(id), received_at TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS requisition_items (
+  id INTEGER PRIMARY KEY, requisition_id INTEGER NOT NULL REFERENCES requisitions(id) ON DELETE CASCADE,
+  product_id INTEGER NOT NULL REFERENCES products(id), quantity INTEGER NOT NULL CHECK(quantity > 0)
+);
+CREATE TABLE IF NOT EXISTS movements (
+  id INTEGER PRIMARY KEY, product_id INTEGER NOT NULL REFERENCES products(id),
+  from_location_id INTEGER REFERENCES locations(id), to_location_id INTEGER REFERENCES locations(id),
+  quantity INTEGER NOT NULL, movement_type TEXT NOT NULL,
+  requisition_id INTEGER REFERENCES requisitions(id), lot_no TEXT, note TEXT,
+  performed_by INTEGER REFERENCES users(id), created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_batches_lookup ON stock_batches(product_id, location_id, state, expires_on);
+CREATE INDEX IF NOT EXISTS idx_reqs_status ON requisitions(status, branch_id);
