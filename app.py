@@ -5,6 +5,7 @@ import os
 import sqlite3
 import secrets
 import re
+import threading
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from functools import wraps
@@ -32,6 +33,8 @@ app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
 )
+_initialization_lock = threading.Lock()
+_database_initialized = False
 
 class PostgresConnection:
     """Small compatibility layer so the existing application can use PostgreSQL or SQLite."""
@@ -410,6 +413,7 @@ def stock_csv():
     return Response("\ufeff"+out.getvalue(), mimetype="text/csv", headers={"Content-Disposition":"attachment; filename=petstock-stock.csv"})
 
 def init_database():
+    global _database_initialized
     if os.environ.get("REQUIRE_SECRET_KEY") == "1" and app.config["SECRET_KEY"] == DEFAULT_SECRET_KEY:
         raise RuntimeError("SECRET_KEY must be set before production startup")
     if not USING_POSTGRES:
@@ -447,6 +451,16 @@ def init_database():
         if record and record[0] == legacy_password:
             conn.execute("UPDATE users SET password=? WHERE username=?", (generate_password_hash(legacy_password), username))
     conn.commit();conn.close()
+    _database_initialized = True
+
+@app.before_request
+def initialize_database_for_serverless():
+    """Vercel imports app.py directly, so initialize the schema on the first request."""
+    global _database_initialized
+    if not _database_initialized:
+        with _initialization_lock:
+            if not _database_initialized:
+                init_database()
 
 if __name__ == "__main__":
     init_database()

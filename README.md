@@ -108,6 +108,3 @@ docker run --rm -p 8000:8000 -e SECRET_KEY="replace-with-a-long-random-value" -v
 4. การ deploy ครั้งแรกจะสร้างตารางและข้อมูลตัวอย่างใน PostgreSQL โดยอัตโนมัติ; เปลี่ยนรหัสผ่าน `admin123` ทันทีหลังเข้าใช้
 
 Vercel จะส่งทุก URL ไปยัง Flask Function เดียวผ่าน rewrite และใช้ `DATABASE_URL` ในการเชื่อมต่อ PostgreSQL. อย่าตั้ง `PETSTOCK_DB` บน Vercel เพราะใช้เฉพาะโหมด SQLite/Docker เท่านั้น
-#   P e t S t o c k - H u b  
- # P e t S t o c k - H u b  
- 

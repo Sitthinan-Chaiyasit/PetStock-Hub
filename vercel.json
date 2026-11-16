@@ -1,12 +1,9 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "functions": {
-    "api/index.py": {
+    "app.py": {
       "includeFiles": "{app.py,schema_postgres.sql,templates/**,static/**}",
       "excludeFiles": "{tests/**,.venv/**,petstock.db,*.db}"
     }
-  },
-  "rewrites": [
-    { "source": "/(.*)", "destination": "/api/index" }
-  ]
+  }
 }
